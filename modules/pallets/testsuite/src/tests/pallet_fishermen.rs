@@ -16,15 +16,22 @@
 #![cfg(test)]
 use polkadot_sdk::*;
 
-use crate::runtime::{new_test_ext, CollatorSet, Ismp, RuntimeOrigin, Test};
+use crate::runtime::{new_test_ext, CollatorSet, Ismp, RuntimeCall, RuntimeOrigin, Test};
 use ismp::{
 	consensus::{StateCommitment, StateMachineHeight, StateMachineId},
 	error::Error,
 	host::{IsmpHost, StateMachine},
 };
-use pallet_fishermen::FishermanBlacklist;
+use frame_support::dispatch::{GetDispatchInfo, Pays};
+use pallet_fishermen::{FishermanBlacklist, PrioritizeVeto};
 use sp_core::{crypto::AccountId32, H160, H256};
-use sp_runtime::{DispatchError, ModuleError};
+use sp_runtime::{
+	traits::{TransactionExtension, TxBaseImplication},
+	transaction_validity::{
+		InvalidTransaction, TransactionPriority, TransactionSource, TransactionValidityError,
+	},
+	DispatchError, ModuleError,
+};
 
 #[test]
 fn test_can_veto_state_commitments() {
@@ -178,5 +185,81 @@ fn test_can_blacklist_arbitrum_claims() {
 			pallet_fishermen::BlacklistedArbitrumClaims::<Test>::get(state_machine_id, claim),
 			Some(collator),
 		);
+	})
+}
+
+/// The fishermen calls dispatch with `Pays::No`, so `compute_fee_raw` waives the fee during
+/// validation, before the dispatch body reaches its own `IsCollator` check. `PrioritizeVeto` is
+/// therefore the only layer that can price the call, and it has to refuse a non-collator outright
+/// rather than just leave the pool priority at its default.
+#[test]
+fn extension_refuses_fisherman_calls_from_non_collators() {
+	new_test_ext().execute_with(|| {
+		let collator: AccountId32 = H256::random().0.into();
+		let outsider: AccountId32 = H256::random().0.into();
+		CollatorSet::set(vec![collator.clone()]);
+
+		let height = StateMachineHeight {
+			id: StateMachineId { state_id: StateMachine::Evm(97), consensus_state_id: *b"ETH0" },
+			height: 225,
+		};
+		let call: RuntimeCall =
+			pallet_fishermen::Call::<Test>::veto_state_commitment { height }.into();
+		let info = call.get_dispatch_info();
+
+		// The waived fee is what makes the validation check load bearing.
+		assert_eq!(info.pays_fee, Pays::No);
+
+		// A non-collator is refused at validation, so the extrinsic never occupies a block.
+		let err = PrioritizeVeto::<Test>::new()
+			.validate(
+				RuntimeOrigin::signed(outsider),
+				&call,
+				&info,
+				0,
+				(),
+				&TxBaseImplication(()),
+				TransactionSource::External,
+			)
+			.expect_err("non-collator fisherman call must be refused at validation");
+		assert_eq!(err, TransactionValidityError::Invalid(InvalidTransaction::Call));
+
+		// A collator still validates, and keeps top pool priority.
+		let (valid, ..) = PrioritizeVeto::<Test>::new()
+			.validate(
+				RuntimeOrigin::signed(collator),
+				&call,
+				&info,
+				0,
+				(),
+				&TxBaseImplication(()),
+				TransactionSource::External,
+			)
+			.expect("collator fisherman call must validate");
+		assert_eq!(valid.priority, TransactionPriority::MAX);
+	})
+}
+
+/// Every other call is untouched: no signer check and the default priority.
+#[test]
+fn extension_leaves_other_calls_alone() {
+	new_test_ext().execute_with(|| {
+		let outsider: AccountId32 = H256::random().0.into();
+		CollatorSet::set(vec![]);
+
+		let call: RuntimeCall = frame_system::Call::<Test>::remark { remark: vec![] }.into();
+		let info = call.get_dispatch_info();
+		let (valid, ..) = PrioritizeVeto::<Test>::new()
+			.validate(
+				RuntimeOrigin::signed(outsider),
+				&call,
+				&info,
+				0,
+				(),
+				&TxBaseImplication(()),
+				TransactionSource::External,
+			)
+			.expect("an unrelated call must validate regardless of the signer");
+		assert_eq!(valid.priority, 0);
 	})
 }

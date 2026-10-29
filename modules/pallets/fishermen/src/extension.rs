@@ -1,11 +1,16 @@
 // Copyright (C) Polytope Labs Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Transaction extension that gives fishermen calls (`veto_state_commitment`,
-//! `blacklist_dispute_game`, `blacklist_arbitrum_claim`) the highest pool
-//! priority, so that the basic-authorship proposer drains them before any
-//! normally-priced extrinsic. Every other call passes through with the
-//! default priority.
+//! Transaction extension for the fishermen calls (`veto_state_commitment`,
+//! `blacklist_dispute_game`, `blacklist_arbitrum_claim`). It refuses them unless the
+//! signer is in the active collator set, and gives the ones it accepts the highest pool
+//! priority so that the basic-authorship proposer drains them before any normally-priced
+//! extrinsic. Every other call passes through with the default priority.
+//!
+//! The refusal is load bearing. These calls dispatch with `Pays::No`, so
+//! `compute_fee_raw` waives the fee during validation, before the dispatch runs its own
+//! `IsCollator` check. Without a check here a non-collator can submit unlimited calls
+//! that fail with `UnauthorizedAction` while paying nothing.
 
 use crate::pallet::{Call, Config};
 use codec::{Decode, DecodeWithMemTracking, Encode};
@@ -15,13 +20,17 @@ use scale_info::TypeInfo;
 use sp_runtime::{
 	impl_tx_ext_default,
 	traits::{DispatchInfoOf, TransactionExtension, ValidateResult},
-	transaction_validity::{TransactionPriority, TransactionSource, ValidTransaction},
+	transaction_validity::{
+		InvalidTransaction, TransactionPriority, TransactionSource, TransactionValidityError,
+		ValidTransaction,
+	},
 	Weight,
 };
 
-/// Bumps `pallet_fishermen` fisherman calls (`veto_state_commitment`,
-/// `blacklist_dispute_game`, `blacklist_arbitrum_claim`) to
-/// [`TransactionPriority::MAX`] in the transaction pool.
+/// Refuses `pallet_fishermen` fisherman calls (`veto_state_commitment`,
+/// `blacklist_dispute_game`, `blacklist_arbitrum_claim`) from signers outside the active
+/// collator set, and bumps the accepted ones to [`TransactionPriority::MAX`] in the
+/// transaction pool.
 #[derive(Encode, Decode, DecodeWithMemTracking, Clone, Eq, PartialEq, TypeInfo)]
 #[scale_info(skip_type_params(T))]
 pub struct PrioritizeVeto<T: Config + Send + Sync>(core::marker::PhantomData<T>);
@@ -82,15 +91,17 @@ where
 				| Some(Call::blacklist_arbitrum_claim { .. })
 		);
 		if is_fisherman_call {
-			if let Ok(account) = polkadot_sdk::frame_system::ensure_signed::<
+			// `Pays::No` means the fee is already waived by the time the dispatch checks
+			// `IsCollator`, so this is the only layer that prices a non-collator's call.
+			let account = polkadot_sdk::frame_system::ensure_signed::<
 				<T as polkadot_sdk::frame_system::Config>::RuntimeOrigin,
 				T::AccountId,
 			>(origin.clone())
-			{
-				if T::IsCollator::contains(&account) {
-					valid.priority = TransactionPriority::MAX;
-				}
+			.map_err(|_| TransactionValidityError::Invalid(InvalidTransaction::Call))?;
+			if !T::IsCollator::contains(&account) {
+				Err(TransactionValidityError::Invalid(InvalidTransaction::Call))?
 			}
+			valid.priority = TransactionPriority::MAX;
 		}
 		Ok((valid, (), origin))
 	}

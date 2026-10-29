@@ -160,8 +160,10 @@ pub mod pallet {
 		/// changes at the provided height. They aren't required to provide any proofs for
 		/// this — any single collator's call deletes the commitment.
 		///
-		/// Dispatches with `Pays::No`. The on-chain `IsCollator` check is the DOS guard, so
-		/// the signer does not need to hold a balance.
+		/// Dispatches with `Pays::No`, so the signer does not need to hold a balance. The
+		/// `PrioritizeVeto` transaction extension is the DOS guard: it refuses the call at
+		/// validation unless the signer is an active collator. The waived fee cannot price
+		/// it and the `IsCollator` check below runs only after the fee decision.
 		#[pallet::call_index(0)]
 		#[pallet::weight((<T as frame_system::Config>::DbWeight::get().reads_writes(1, 2), Pays::No))]
 		pub fn veto_state_commitment(
@@ -202,7 +204,8 @@ pub mod pallet {
 		/// `unblacklist` extrinsic) — the consensus verifier will refuse any future
 		/// `OpFaultProofGames` consensus proof that references this proxy.
 		///
-		/// Dispatches with `Pays::No`. The on-chain `IsCollator` check is the DOS guard.
+		/// Dispatches with `Pays::No`. The `PrioritizeVeto` transaction extension is the DOS
+		/// guard: it refuses the call at validation unless the signer is an active collator.
 		#[pallet::call_index(1)]
 		#[pallet::weight((<T as frame_system::Config>::DbWeight::get().reads_writes(1, 1), Pays::No))]
 		pub fn blacklist_dispute_game(
@@ -236,7 +239,8 @@ pub mod pallet {
 		/// consensus verifier will refuse any future `ArbitrumOrbit` or `ArbitrumBold`
 		/// consensus proof that resolves to this claim hash.
 		///
-		/// Dispatches with `Pays::No`. The on-chain `IsCollator` check is the DOS guard.
+		/// Dispatches with `Pays::No`. The `PrioritizeVeto` transaction extension is the DOS
+		/// guard: it refuses the call at validation unless the signer is an active collator.
 		#[pallet::call_index(2)]
 		#[pallet::weight((<T as frame_system::Config>::DbWeight::get().reads_writes(1, 1), Pays::No))]
 		pub fn blacklist_arbitrum_claim(

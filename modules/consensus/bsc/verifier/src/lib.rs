@@ -79,14 +79,18 @@ pub fn verify_bsc_header<H: Keccak256, C: Config>(
 		Err(Error::VoteAddressSetBeyondValidatorCount)?
 	}
 
-	// We have to use the same threshold specified in the bsc parlia consensus which is 2/3
+	// Mirror the threshold parlia itself enforces, `CeilDiv(len(validators)*2, 3)`:
+	// plain integer division floors, which admits one fewer vote than parlia requires whenever
+	// the validator count is not a multiple of three. At that point two conflicting quorums can
+	// overlap in no more than the tolerated fault count, so the client could finalize a block
+	// parlia leaves unjustified.
 	// https://github.com/bnb-chain/bsc/blob/da35ee13e2fe38efaeab2d6fb27f112332459b50/consensus/parlia/parlia.go#L557
 	let participant_count = validators_bit_set
 		.iter()
 		.take(current_validators.len())
 		.filter(|bit| *bit)
 		.count();
-	if participant_count < ((2 * current_validators.len()) / 3) {
+	if participant_count < (2 * current_validators.len()).div_ceil(3) {
 		Err(Error::NotEnoughParticipants)?
 	}
 
@@ -380,6 +384,55 @@ mod tests {
 		let err = verify_bsc_header::<TestHost, Testnet>(&validators, update_with(header), 1000)
 			.expect_err("under-threshold update must be rejected");
 		assert!(format!("{err}").contains("Not enough participants"), "unexpected error: {err:?}");
+	}
+
+	/// Parlia requires `CeilDiv(len(validators)*2, 3)` votes. Plain integer division floors,
+	/// and the two differ by one whenever the validator count is not a multiple of three: at
+	/// 20 validators the ceiling is 14 while the floor was 13. The floor form therefore
+	/// accepted an attestation parlia leaves unjustified.
+	#[test]
+	fn requires_parlia_ceiling_quorum() {
+		let validators = dummy_validators(20);
+
+		// 13 of 20 is one short of ceil(40/3) = 14, and must be rejected.
+		let header =
+			header_with_vote_set((1u64 << 13) - 1, B256::repeat_byte(1), B256::repeat_byte(2));
+		let err = verify_bsc_header::<TestHost, Testnet>(&validators, update_with(header), 1000)
+			.expect_err("13 of 20 is below parlia's ceiling quorum");
+		assert!(format!("{err}").contains("Not enough participants"), "unexpected error: {err:?}");
+
+		// 14 of 20 meets it, so the quorum gate passes and the failure moves downstream to
+		// the header/vote binding check.
+		let header =
+			header_with_vote_set((1u64 << 14) - 1, B256::repeat_byte(1), B256::repeat_byte(2));
+		let err = verify_bsc_header::<TestHost, Testnet>(&validators, update_with(header), 1000)
+			.expect_err("downstream header-binding check must fail");
+		assert!(
+			!format!("{err}").contains("Not enough participants"),
+			"quorum gate must pass at the ceiling: {err:?}"
+		);
+	}
+
+	/// The 21-validator mainnet cabinet is unaffected by the ceiling change: floor and
+	/// ceiling both give 14, which is why no deployed configuration changed behaviour.
+	#[test]
+	fn mainnet_cabinet_quorum_unchanged() {
+		let validators = dummy_validators(21);
+
+		let header =
+			header_with_vote_set((1u64 << 13) - 1, B256::repeat_byte(1), B256::repeat_byte(2));
+		let err = verify_bsc_header::<TestHost, Testnet>(&validators, update_with(header), 1000)
+			.expect_err("13 of 21 is below the 14-vote quorum");
+		assert!(format!("{err}").contains("Not enough participants"), "unexpected error: {err:?}");
+
+		let header =
+			header_with_vote_set((1u64 << 14) - 1, B256::repeat_byte(1), B256::repeat_byte(2));
+		let err = verify_bsc_header::<TestHost, Testnet>(&validators, update_with(header), 1000)
+			.expect_err("downstream header-binding check must fail");
+		assert!(
+			!format!("{err}").contains("Not enough participants"),
+			"quorum gate must pass at 14 of 21: {err:?}"
+		);
 	}
 
 	/// Minimal header at a given block number (no vote attestation).
